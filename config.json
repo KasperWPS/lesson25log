@@ -1,0 +1,32 @@
+[
+
+	{
+		"name": "log",
+		"cpus": 2,
+		"gui": false,
+		"box": "centos/7",
+		"ip_addr": "192.168.56.15",
+		"memory": 1024,
+		"no_share": true
+	},
+	{
+		"name": "web",
+		"cpus": 2,
+		"gui": false,
+		"box": "centos/7",
+		"ip_addr": "192.168.56.10",
+		"memory": "1024",
+		"no_share": true
+	},
+	{
+		"name": "elk",
+		"cpus": 2,
+		"gui": false,
+		"box": "generic/ubuntu1804",
+		"ip_addr": "192.168.56.20",
+		"memory": "8096",
+		"no_share": true,
+		"forward_port": "5601"
+	}
+]
+

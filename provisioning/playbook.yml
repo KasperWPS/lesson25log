@@ -1,0 +1,367 @@
+---
+- hosts: web log
+  become: true
+  gather_facts: false
+
+  tasks:
+  - name: Accept login with password from sshd
+    ansible.builtin.lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^PasswordAuthentication no$'
+      line: 'PasswordAuthentication yes'
+      state: present
+    notify:
+      - Restart sshd
+
+  - name: Install vim
+    ansible.builtin.yum:
+      name:
+        - vim
+        - mc
+        - tcpdump
+      state: present
+
+  - name: Set timezone
+    community.general.timezone:
+      name: Europe/Moscow
+    notify:
+      - Restart Chrony service
+
+
+  handlers:
+
+  - name: Restart Chrony service
+    ansible.builtin.service:
+      name: chronyd
+      state: restarted
+
+  - name: Restart sshd
+    service:
+      name: sshd
+      state: restarted
+
+- hosts: web
+  become: true
+  gather_facts: false
+
+  vars:
+    ip_log: 192.168.56.15
+
+  tasks:
+
+  - name: Install epel-release
+    ansible.builtin.yum:
+      name: epel-release
+      state: present
+
+  - name: Install nginx
+    ansible.builtin.yum:
+      name: nginx
+      state: present
+    notify: 
+      - Restart nginx service
+
+  - name: Install audispd-plugins
+    ansible.builtin.yum:
+      name: audispd-plugins
+      state: present
+
+  - name: Copy audit rules for nginx
+    ansible.builtin.copy:
+      src: ./files/nginx.rules
+      dest: /etc/audit/rules.d/nginx.rules
+      owner: root
+      group: root
+      mode: '0600'
+    notify:
+      - Restart auditd service
+
+  - name: Change auditd name format to HOSTNAME
+    ansible.builtin.lineinfile:
+      dest: /etc/audit/auditd.conf
+      line: 'name_format = HOSTNAME'
+      regexp: '^name_format = NONE$'
+      state: present
+    notify:
+      - Restart auditd service
+
+  - name: Change auditd remote server
+    ansible.builtin.lineinfile:
+      dest: /etc/audisp/audisp-remote.conf
+      line: 'remote_server = {{ ip_log }}'
+      regexp: '^remote_server = $'
+      state: present
+    notify:
+      - Restart auditd service
+
+  - name: Activate remote options auditd
+    ansible.builtin.lineinfile:
+      dest: /etc/audisp/plugins.d/au-remote.conf
+      line: 'active = yes'
+      regexp: '^active = no$'
+      state: present
+    notify:
+      - Restart auditd service
+
+  - name: Edit nginx config. Add error_log
+    ansible.builtin.lineinfile:
+      dest: /etc/nginx/nginx.conf
+      line: 'error_log syslog:server={{ ip_log }}:514,tag=nginx_error;'
+      insertafter: 'error_log /var/log/nginx/error.log;'
+      state: present
+    notify:
+      - Restart nginx service
+
+  - name: Edit nginx config. Add access_log
+    ansible.builtin.lineinfile:
+      dest: /etc/nginx/nginx.conf
+      line: '    access_log syslog:server={{ ip_log }}:514,tag=nginx_access,severity=info combined;'
+      insertafter: '    access_log  /var/log/nginx/access.log  main;'
+      state: present
+    notify:
+      - Restart nginx service
+
+  - name: Add Elasticsearch GPG key.
+    rpm_key:
+      key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+      state: present
+
+  - name: Add Filebeat repository.
+    ansible.builtin.copy:
+      src: ./files/filebeat/elastic-8.x.repo
+      dest: /etc/yum.repos.d/elastic-8.x.repo
+      mode: 0644
+
+  - name: Install filebeat (ELK)
+    ansible.builtin.yum:
+      name: filebeat
+      state: present
+    notify:
+      - Restart filebeat service
+
+  - name: Copy filebeat config
+    ansible.builtin.copy:
+      src: ./files/filebeat/filebeat.yml
+      dest: /etc/filebeat/filebeat.yml
+      mode: 0644
+    notify:
+      - Restart filebeat service
+
+  handlers:
+
+  - name: Restart nginx service
+    ansible.builtin.service:
+      name: nginx
+      enabled: true
+      state: restarted
+
+    # auditd модулем ansible.builtin.service корректно не перезапускается
+  - name: Restart auditd service
+    ansible.builtin.command: service auditd restart
+
+  - name: Restart filebeat service
+    ansible.builtin.service:
+      name: filebeat
+      enabled: true
+      state: restarted
+      use: service
+
+- hosts: log
+  become: true
+  gather_facts: false
+
+  tasks:
+
+  - name: Uncomment module imtcp
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/rsyslog.conf
+      regexp: '^#\$ModLoad imtcp$'
+      line: '$ModLoad imtcp'
+    notify:
+      - Restart rsyslog service
+
+  - name: Uncomment tcp port 514
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/rsyslog.conf
+      regexp: '^#\$InputTCPServerRun 514$'
+      line: '$InputTCPServerRun 514'
+    notify:
+      - Restart rsyslog service
+
+  - name: Uncomment module imudp
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/rsyslog.conf
+      regexp: '^#\$ModLoad imudp$'
+      line: '$ModLoad imudp'
+    notify:
+      - Restart rsyslog service
+
+  - name: Uncomment udp port 514
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/rsyslog.conf
+      regexp: '^#\$UDPServerRun 514$'
+      line: '$UDPServerRun 514'
+    notify:
+      - Restart rsyslog service
+
+  - name: Add template remote logs
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/rsyslog.conf
+      regexp: '# ### end of the forwarding rule ###'
+      line: '\n\n#Add remote logs\n$template RemoteLogs,"/var/log/rsyslog/%HOSTNAME%/%PROGRAMNAME%.log"\n*.* -?RemoteLogs'
+    notify:
+      - Restart rsyslog service
+
+  - name: Uncomment module imtcp
+    ansible.builtin.lineinfile:
+      backrefs: true
+      path: /etc/audit/auditd.conf
+      regexp: '^##tcp_listen_port = 60$'
+      line: 'tcp_listen_port = 60'
+    notify:
+      - Restart auditd service
+
+  handlers:
+
+  - name: Restart rsyslog service
+    ansible.builtin.command: service rsyslog restart
+
+  - name: Restart auditd service
+    ansible.builtin.command: service auditd restart
+
+- hosts: elk
+  become: true
+  gather_facts: false
+
+  vars:
+    passwd_elastic: "dha(&dya8sd*.SIdfhsk"
+
+  tasks:
+
+  - name: Set timezone to Europe/Moscow
+    ansible.builtin.command: timedatectl set-timezone Europe/Moscow
+
+  - name: Add Elasticsearch apt key
+    ansible.builtin.apt_key:
+      url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+      state: present
+
+  - name: Adding Elasticsearch repo
+    ansible.builtin.apt_repository:
+      repo: deb https://mirror.yandex.ru/mirrors/elastic/8 stable main
+      state: present
+
+  - name: Update and upgrade apt packages
+    ansible.builtin.apt:
+      upgrade: yes
+      update_cache: yes
+      cache_valid_time: 86400
+
+  - name: Install JDK
+    ansible.builtin.apt:
+      name: default-jdk
+      update_cache: yes
+
+  - name: Install Midnight Commander
+    ansible.builtin.apt:
+      name: mc
+      update_cache: yes
+
+  - name: Install Elasticsearch
+    ansible.builtin.apt:
+      name: elasticsearch
+      update_cache: yes
+    notify:
+      - Starting Elasticsearch
+
+  - name: Install Kibana
+    ansible.builtin.apt:
+      name: kibana
+      update_cache: yes
+    notify:
+      - Starting Kibana
+
+  - name: Change host address kibana
+    ansible.builtin.lineinfile:
+      destfile: /etc/kibana/kibana.yml
+      regexp: 'server.host:'
+      line: 'server.host: "0.0.0.0"'
+    notify:
+      - Starting Kibana
+
+  - name: Change port kibana
+    ansible.builtin.lineinfile:
+      destfile: /etc/kibana/kibana.yml
+      regexp: 'server.port:'
+      line: 'server.port: 5601'
+    notify:
+      - Starting Kibana
+
+  - name: Install Logstash
+    ansible.builtin.apt:
+      name: logstash
+      update_cache: yes
+    notify:
+      - Copy logstash configs
+
+  handlers:
+
+  - name: Starting Elasticsearch
+    ansible.builtin.systemd_service:
+      name: elasticsearch
+      daemon_reload: true
+      enabled: true
+      state: restarted
+
+  - name: Starting Kibana
+    ansible.builtin.systemd_service:
+      name: kibana
+      daemon_reload: true
+      enabled: true
+      state: restarted
+
+  - name: Copy logstash configs
+    ansible.builtin.copy:
+      src: ./files/logstash/
+      dest: /etc/logstash/conf.d/
+      owner: root
+      group: logstash
+      mode: '0640'
+    notify:
+      - Copy script for generate elastic password
+
+  - name: Copy script for generate elastic password
+    ansible.builtin.copy:
+      src: ./files/elasticsearch/set_pass.sh
+      dest: /root/set_pass.sh
+      owner: root
+      group: root
+      mode: '0700'
+    notify:
+      - Generate password elastic user
+
+  - name: Generate password elastic user
+    ansible.builtin.command: /root/set_pass.sh
+    register: elastic_password
+    notify:
+      - Set elastic password in logstash output config
+
+  - name: Set elastic password in logstash output config
+    ansible.builtin.lineinfile:
+      destfile: /etc/logstash/conf.d/output.conf
+      regexp: '    password => ""'
+      line: '    password => "{{ elastic_password.stdout }}"'
+    notify:
+      - Starting Logstash
+
+  - name: Starting Logstash
+    ansible.builtin.systemd_service:
+      name: logstash
+      daemon_reload: true
+      enabled: true
+      state: restarted
